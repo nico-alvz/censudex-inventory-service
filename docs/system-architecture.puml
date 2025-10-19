@@ -1,0 +1,19 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+
+title Censudx Inventory Service - System Architecture
+
+actor Client as client
+rectangle "API Gateway\n(Nginx)" as gateway
+rectangle "FastAPI\nInventory Service" as service
+database "PostgreSQL\nDatabase" as db
+queue "RabbitMQ\nMessaging" as mq
+component "Redis\nCache" as cache
+
+client --> gateway : HTTP/HTTPS
+gateway --> service : proxy
+service --> db : SQL
+service --> mq : events
+service --> cache : caching
+
+@enduml@enduml
