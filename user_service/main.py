@@ -136,9 +136,7 @@ class InventoryServicer(inventory_pb2_grpc.InventoryServiceServicer):
                 if old_quantity > LOW_STOCK_THRESHOLD or old_quantity > new_quantity:
                     try:
                         # Publish low stock alert to RabbitMQ asynchronously
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(
+                        asyncio.run(
                             messaging_service.publish_low_stock_alert(
                                 inventory_item_id=item["id"],
                                 product_id=item["product_id"],
@@ -146,7 +144,6 @@ class InventoryServicer(inventory_pb2_grpc.InventoryServiceServicer):
                                 threshold=LOW_STOCK_THRESHOLD
                             )
                         )
-                        loop.close()
                         
                         logger.warning(
                             f"LOW STOCK ALERT: Product {item['product_id']} "
@@ -158,9 +155,7 @@ class InventoryServicer(inventory_pb2_grpc.InventoryServiceServicer):
             # Publish inventory update event
             if old_quantity != new_quantity:
                 try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(
+                    asyncio.run(
                         messaging_service.publish_inventory_update(
                             inventory_item_id=item["id"],
                             product_id=item["product_id"],
@@ -169,7 +164,6 @@ class InventoryServicer(inventory_pb2_grpc.InventoryServiceServicer):
                             transaction_type="UPDATE"
                         )
                     )
-                    loop.close()
                 except Exception as e:
                     logger.error(f"Failed to publish inventory update: {e}")
             
@@ -276,10 +270,7 @@ def serve():
     try:
         # Connect to RabbitMQ
         logger.info(f"Connecting to RabbitMQ at {rabbitmq_url}")
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(messaging_service.connect())
-        loop.close()
+        asyncio.run(messaging_service.connect())
         logger.info(f"RabbitMQ connection established. Alerts enabled: {ENABLE_AUTO_ALERTS}, Threshold: {LOW_STOCK_THRESHOLD}")
         
         # Start gRPC server
@@ -296,10 +287,7 @@ def serve():
     finally:
         # Cleanup RabbitMQ connection
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(messaging_service.disconnect())
-            loop.close()
+            asyncio.run(messaging_service.disconnect())
         except Exception as e:
             logger.error(f"Error disconnecting from RabbitMQ: {e}")
 
