@@ -6,7 +6,7 @@ All communication via gRPC on port 50051
 
 import logging
 import os
-import asyncio
+import threading
 from concurrent import futures
 
 import grpc
@@ -29,6 +29,22 @@ ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "true").lower() == "true"
 # Initialize RabbitMQ service
 rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
 messaging_service = RabbitMQService(rabbitmq_url)
+
+# Helper function to run async code from sync context
+def run_async_in_thread(coro):
+    """Run a coroutine in a separate thread with its own event loop"""
+    import asyncio
+    def runner():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+    
+    thread = threading.Thread(target=runner)
+    thread.start()
+    thread.join(timeout=5.0)  # 5 second timeout
 
 # Mock inventory database
 inventory_db = {
@@ -136,7 +152,7 @@ class InventoryServicer(inventory_pb2_grpc.InventoryServiceServicer):
                 if old_quantity > LOW_STOCK_THRESHOLD or old_quantity > new_quantity:
                     try:
                         # Publish low stock alert to RabbitMQ asynchronously
-                        asyncio.run(
+                        run_async_in_thread(
                             messaging_service.publish_low_stock_alert(
                                 inventory_item_id=item["id"],
                                 product_id=item["product_id"],
@@ -155,7 +171,7 @@ class InventoryServicer(inventory_pb2_grpc.InventoryServiceServicer):
             # Publish inventory update event
             if old_quantity != new_quantity:
                 try:
-                    asyncio.run(
+                    run_async_in_thread(
                         messaging_service.publish_inventory_update(
                             inventory_item_id=item["id"],
                             product_id=item["product_id"],
@@ -267,6 +283,7 @@ class InventoryServicer(inventory_pb2_grpc.InventoryServiceServicer):
 
 def serve():
     """Start gRPC server on port 50051"""
+    import asyncio
     try:
         # Connect to RabbitMQ
         logger.info(f"Connecting to RabbitMQ at {rabbitmq_url}")
