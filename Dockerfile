@@ -20,26 +20,33 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies first (better caching)
+# Use custom pip cache directory instead of /tmp to avoid space issues
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+RUN mkdir -p /app/.pip-cache \
+    && pip install --no-cache-dir --upgrade pip \
+    && pip install --cache-dir /app/.pip-cache -r requirements.txt \
+    && pip install --cache-dir /app/.pip-cache grpcio grpcio-tools protobuf==4.24.4
 
 # Copy project files
 COPY . .
 
-# Create necessary directories and set permissions
+# Compile protobuf files to Python gRPC stubs
+RUN python -m grpc_tools.protoc \
+    -I. \
+    --python_out=user_service \
+    --grpc_python_out=user_service \
+    inventory.proto \
+    && sed -i 's/^from . import inventory_pb2/import inventory_pb2/' user_service/inventory_pb2_grpc.py
+
+# Create necessary directories
 RUN mkdir -p /app/logs
 
-# Create health check script
-RUN echo '#!/bin/bash\ncurl -f http://localhost:8000/health || exit 1' > /app/healthcheck.sh \
-    && chmod +x /app/healthcheck.sh
+# Expose gRPC port (not HTTP)
+EXPOSE 50051
 
-# Expose port
-EXPOSE 8000
-
-# Add health check
+# Health check - gRPC service on port 50051
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD /app/healthcheck.sh
+    CMD python -c "import grpc; grpc.aio.insecure_channel('localhost:50051').close()" || exit 1
 
-# Default command - use single worker for testing
-CMD ["uvicorn", "user_service.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# Run pure gRPC server
+CMD ["python", "user_service/main.py"]

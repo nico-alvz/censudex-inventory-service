@@ -1,174 +1,230 @@
 """
-Main FastAPI application for Censudx Inventory Service
+Inventory Service - Pure gRPC Server
+Implements gRPC services for inventory management.
+All communication via gRPC on port 50051
 """
 
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.security import HTTPBearer
-from typing import List, Optional
-from pydantic import BaseModel
+import logging
+from concurrent import futures
 
-app = FastAPI(
-    title="Censudx Inventory Service",
-    description="🏦 A comprehensive inventory management microservice built with FastAPI, PostgreSQL, and RabbitMQ. "
-                "Provides robust inventory tracking, stock management, and automated alerting capabilities.",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
-    contact={
-        "name": "Censudx Inventory Service",
-        "url": "https://github.com/och1ai/censudx-inventory-service",
-    },
-    license_info={
-        "name": "MIT License",
-        "url": "https://opensource.org/licenses/MIT",
-    },
-    tags_metadata=[
-        {
-            "name": "health",
-            "description": "Health check endpoints for service monitoring",
-        },
-        {
-            "name": "inventory",
-            "description": "CRUD operations for inventory items management",
-        },
-        {
-            "name": "stock",
-            "description": "Stock operations: check availability, reserve, and release",
-        },
-        {
-            "name": "alerts",
-            "description": "Low stock alerts and notification management",
-        },
-        {
-            "name": "transactions",
-            "description": "Inventory transaction history and audit trail",
-        },
-    ]
-)
-security = HTTPBearer()
+import grpc
 
-# Health check endpoint
-@app.get("/health", tags=["health"], summary="Health Check", description="Returns the health status of the inventory service")
-async def health_check():
-    """Health check endpoint for monitoring service availability"""
-    return {"status": "healthy", "service": "inventory-service", "version": "1.0.0"}
+# Import generated gRPC stubs - compiled during Docker build
+import inventory_pb2
+import inventory_pb2_grpc
 
-# Basic Pydantic models for testing
-class InventoryItemCreate(BaseModel):
-    product_id: str
-    quantity: int
-    location: str
-    reserved_quantity: int = 0
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class InventoryItemUpdate(BaseModel):
-    quantity: Optional[int] = None
-    location: Optional[str] = None
-    reserved_quantity: Optional[int] = None
+# Mock inventory database
+inventory_db = {
+    1: {"id": 1, "product_id": "PROD001", "quantity": 100, "location": "warehouse_a", "reserved_quantity": 10},
+    2: {"id": 2, "product_id": "PROD002", "quantity": 50, "location": "warehouse_b", "reserved_quantity": 5},
+}
 
-class InventoryItemResponse(BaseModel):
-    id: int
-    product_id: str
-    quantity: int
-    location: str
-    reserved_quantity: int
 
-class StockCheckRequest(BaseModel):
-    product_id: str
-    requested_quantity: int
 
-class StockCheckResponse(BaseModel):
-    available: bool
-    current_stock: int
-    available_stock: int
-    requested_quantity: int
+class InventoryServicer(inventory_pb2_grpc.InventoryServiceServicer):
+    """gRPC Inventory Service Implementation"""
+    
+    def GetInventory(self, request, context):
+        """Get inventory item by product ID"""
+        logger.info(f"gRPC: GetInventory for {request.product_id}")
+        try:
+            for item in inventory_db.values():
+                if item["product_id"] == request.product_id:
+                    return inventory_pb2.InventoryItem(
+                        id=item["id"],
+                        product_id=item["product_id"],
+                        quantity=item["quantity"],
+                        location=item["location"],
+                        reserved_quantity=item["reserved_quantity"],
+                    )
+            context.abort(grpc.StatusCode.NOT_FOUND, f"Product {request.product_id} not found")
+        except Exception as e:
+            logger.error(f"GetInventory error: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+    
+    def ListInventory(self, request, context):
+        """List all inventory items with pagination"""
+        logger.info(f"gRPC: ListInventory limit={request.limit}, offset={request.offset}")
+        try:
+            limit = request.limit or 10
+            offset = request.offset or 0
+            
+            items_list = list(inventory_db.values())
+            total = len(items_list)
+            paginated = items_list[offset:offset + limit]
+            
+            pb_items = [
+                inventory_pb2.InventoryItem(
+                    id=item["id"],
+                    product_id=item["product_id"],
+                    quantity=item["quantity"],
+                    location=item["location"],
+                    reserved_quantity=item["reserved_quantity"],
+                )
+                for item in paginated
+            ]
+            
+            return inventory_pb2.ListInventoryResponse(items=pb_items, total=total)
+        except Exception as e:
+            logger.error(f"ListInventory error: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+    
+    def CreateInventory(self, request, context):
+        """Create new inventory item"""
+        logger.info(f"gRPC: CreateInventory {request.product_id}")
+        try:
+            new_id = max(inventory_db.keys()) + 1 if inventory_db else 1
+            new_item = {
+                "id": new_id,
+                "product_id": request.product_id,
+                "quantity": request.quantity,
+                "location": request.location,
+                "reserved_quantity": request.reserved_quantity,
+            }
+            inventory_db[new_id] = new_item
+            logger.info(f"Created inventory item {new_id}")
+            return inventory_pb2.InventoryItem(
+                id=new_item["id"],
+                product_id=new_item["product_id"],
+                quantity=new_item["quantity"],
+                location=new_item["location"],
+                reserved_quantity=new_item["reserved_quantity"],
+            )
+        except Exception as e:
+            logger.error(f"CreateInventory error: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+    
+    def UpdateInventory(self, request, context):
+        """Update inventory item"""
+        logger.info(f"gRPC: UpdateInventory id={request.id}")
+        try:
+            if request.id not in inventory_db:
+                context.abort(grpc.StatusCode.NOT_FOUND, f"Item {request.id} not found")
+            
+            item = inventory_db[request.id]
+            if request.quantity > 0:
+                item["quantity"] = request.quantity
+            if request.location:
+                item["location"] = request.location
+            if request.reserved_quantity >= 0:
+                item["reserved_quantity"] = request.reserved_quantity
+            
+            logger.info(f"Updated inventory item {request.id}")
+            return inventory_pb2.InventoryItem(
+                id=item["id"],
+                product_id=item["product_id"],
+                quantity=item["quantity"],
+                location=item["location"],
+                reserved_quantity=item["reserved_quantity"],
+            )
+        except Exception as e:
+            logger.error(f"UpdateInventory error: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+    
+    def DeleteInventory(self, request, context):
+        """Delete inventory item"""
+        logger.info(f"gRPC: DeleteInventory id={request.id}")
+        try:
+            if request.id not in inventory_db:
+                context.abort(grpc.StatusCode.NOT_FOUND, f"Item {request.id} not found")
+            del inventory_db[request.id]
+            logger.info(f"Deleted inventory item {request.id}")
+            return inventory_pb2.Empty()
+        except Exception as e:
+            logger.error(f"DeleteInventory error: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+    
+    def CheckStock(self, request, context):
+        """Check stock availability"""
+        logger.info(f"gRPC: CheckStock {request.product_id} qty={request.requested_quantity}")
+        try:
+            for item in inventory_db.values():
+                if item["product_id"] == request.product_id:
+                    available_stock = item["quantity"] - item["reserved_quantity"]
+                    is_available = available_stock >= request.requested_quantity
+                    return inventory_pb2.StockCheckResponse(
+                        available=is_available,
+                        current_stock=item["quantity"],
+                        available_stock=available_stock,
+                        requested_quantity=request.requested_quantity,
+                    )
+            context.abort(grpc.StatusCode.NOT_FOUND, f"Product {request.product_id} not found")
+        except Exception as e:
+            logger.error(f"CheckStock error: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+    
+    def ReserveStock(self, request, context):
+        """Reserve stock for order"""
+        logger.info(f"gRPC: ReserveStock {request.product_id} qty={request.quantity} ref={request.reference_id}")
+        try:
+            for item in inventory_db.values():
+                if item["product_id"] == request.product_id:
+                    available = item["quantity"] - item["reserved_quantity"]
+                    if available >= request.quantity:
+                        item["reserved_quantity"] += request.quantity
+                        logger.info(f"Reserved {request.quantity} units for {request.reference_id}")
+                        return inventory_pb2.StockReserveResponse(
+                            success=True,
+                            message=f"Reserved {request.quantity} units for {request.reference_id}"
+                        )
+                    else:
+                        return inventory_pb2.StockReserveResponse(
+                            success=False,
+                            message=f"Insufficient stock. Available: {available}"
+                        )
+            return inventory_pb2.StockReserveResponse(
+                success=False,
+                message=f"Product {request.product_id} not found"
+            )
+        except Exception as e:
+            logger.error(f"ReserveStock error: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+    
+    def ReleaseStock(self, request, context):
+        """Release reserved stock"""
+        logger.info(f"gRPC: ReleaseStock {request.product_id} qty={request.quantity} ref={request.reference_id}")
+        try:
+            for item in inventory_db.values():
+                if item["product_id"] == request.product_id:
+                    if item["reserved_quantity"] >= request.quantity:
+                        item["reserved_quantity"] -= request.quantity
+                        logger.info(f"Released {request.quantity} units from {request.reference_id}")
+                        return inventory_pb2.StockReserveResponse(
+                            success=True,
+                            message=f"Released {request.quantity} units from {request.reference_id}"
+                        )
+                    else:
+                        return inventory_pb2.StockReserveResponse(
+                            success=False,
+                            message=f"Cannot release more than reserved ({item['reserved_quantity']})"
+                        )
+            return inventory_pb2.StockReserveResponse(
+                success=False,
+                message=f"Product {request.product_id} not found"
+            )
+        except Exception as e:
+            logger.error(f"ReleaseStock error: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
 
-class StockReserveRequest(BaseModel):
-    product_id: str
-    quantity: int
-    reference_id: str
 
-# Inventory endpoints
-@app.get("/api/v1/inventory/", response_model=List[InventoryItemResponse], tags=["inventory"], summary="Get All Inventory Items")
-async def get_inventory_items():
-    """Retrieve all inventory items with their current stock levels"""
-    return []
-
-# Alert endpoints
-@app.get("/api/v1/inventory/alerts", tags=["alerts"], summary="Get Low Stock Alerts")
-async def get_low_stock_alerts():
-    """Retrieve all unresolved low stock alerts"""
-    return []
-
-# Transaction endpoints
-@app.get("/api/v1/inventory/transactions/{item_id}", tags=["transactions"], summary="Get Item Transaction History")
-async def get_transactions(item_id: int):
-    """Retrieve transaction history for a specific inventory item"""
-    return []
-
-# Stock operation endpoints
-@app.post("/api/v1/inventory/check-stock", response_model=StockCheckResponse, tags=["stock"], summary="Check Stock Availability")
-async def check_stock(request: StockCheckRequest):
-    """Check if requested quantity is available for a specific product"""
-    return StockCheckResponse(
-        available=True,
-        current_stock=100,
-        available_stock=95,
-        requested_quantity=request.requested_quantity
-    )
-
-@app.post("/api/v1/inventory/reserve", tags=["stock"], summary="Reserve Stock")
-async def reserve_stock(request: StockReserveRequest):
-    """Reserve stock for a pending order or allocation"""
-    return {"message": "Stock reserved successfully"}
-
-@app.post("/api/v1/inventory/release", tags=["stock"], summary="Release Reserved Stock")
-async def release_stock(request: StockReserveRequest):
-    """Release previously reserved stock back to available inventory"""
-    return {"message": "Stock released successfully"}
-
-# CRUD endpoints (parametric routes last to avoid conflicts)
-@app.get("/api/v1/inventory/{item_id}", response_model=InventoryItemResponse, tags=["inventory"], summary="Get Inventory Item by ID")
-async def get_inventory_item(item_id: int):
-    """Retrieve a specific inventory item by its unique identifier"""
-    if item_id == 999:
-        raise HTTPException(status_code=404, detail="Item not found")
-    return InventoryItemResponse(
-        id=item_id,
-        product_id="test_product",
-        quantity=100,
-        location="warehouse_a",
-        reserved_quantity=0
-    )
-
-@app.post("/api/v1/inventory/", response_model=InventoryItemResponse, tags=["inventory"], summary="Create New Inventory Item")
-async def create_inventory_item(item: InventoryItemCreate):
-    """Create a new inventory item with initial stock levels"""
-    return InventoryItemResponse(
-        id=1,
-        product_id=item.product_id,
-        quantity=item.quantity,
-        location=item.location,
-        reserved_quantity=item.reserved_quantity
-    )
-
-@app.put("/api/v1/inventory/{item_id}", response_model=InventoryItemResponse, tags=["inventory"], summary="Update Inventory Item")
-async def update_inventory_item(item_id: int, item: InventoryItemUpdate):
-    """Update an existing inventory item's quantity, location, or reserved stock"""
-    return InventoryItemResponse(
-        id=item_id,
-        product_id="test_product",  # Keep existing product_id
-        quantity=item.quantity or 100,
-        location=item.location or "warehouse_a",
-        reserved_quantity=item.reserved_quantity or 0
-    )
-
-@app.delete("/api/v1/inventory/{item_id}", tags=["inventory"], summary="Delete Inventory Item")
-async def delete_inventory_item(item_id: int):
-    """Permanently delete an inventory item and all associated data"""
-    return {"message": "Item deleted successfully"}
+def serve():
+    """Start gRPC server on port 50051"""
+    try:
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+        inventory_pb2_grpc.add_InventoryServiceServicer_to_server(InventoryServicer(), server)
+        server.add_insecure_port("[::]:50051")
+        logger.info("gRPC Inventory Service starting on [::]:50051")
+        server.start()
+        logger.info("gRPC Inventory Service started successfully")
+        server.wait_for_termination()
+    except Exception as e:
+        logger.error(f"Failed to start gRPC server: {e}")
+        raise
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    serve()
