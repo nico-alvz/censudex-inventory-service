@@ -34,8 +34,8 @@ sleep 0.5
 LOGIN_RESPONSE=$(curl -s -X POST "$GATEWAY_URL/api/login" \
     -H "Content-Type: application/json" \
     -d '{
-        "username": "admin",
-        "password": "admin123"
+        "username": "adminCensudex",
+        "password": "Admin1234!"
     }')
 
 TOKEN=$(echo $LOGIN_RESPONSE | grep -o '"access_token":"[^"]*' | cut -d'"' -f4)

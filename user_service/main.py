@@ -6,7 +6,6 @@ All communication via gRPC on port 50051
 
 import logging
 import os
-import threading
 from concurrent import futures
 
 import grpc
@@ -15,8 +14,8 @@ import grpc
 import inventory_pb2
 import inventory_pb2_grpc
 
-# Import RabbitMQ service
-from messaging.rabbitmq import RabbitMQService
+# Import Synchronous RabbitMQ service
+from messaging.rabbitmq_sync import SyncRabbitMQService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,25 +25,9 @@ logger = logging.getLogger(__name__)
 LOW_STOCK_THRESHOLD = int(os.getenv("LOW_STOCK_THRESHOLD", "50"))
 ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "true").lower() == "true"
 
-# Initialize RabbitMQ service
+# Initialize RabbitMQ service (synchronous version)
 rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
-messaging_service = RabbitMQService(rabbitmq_url)
-
-# Helper function to run async code from sync context
-def run_async_in_thread(coro):
-    """Run a coroutine in a separate thread with its own event loop"""
-    import asyncio
-    def runner():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
-    
-    thread = threading.Thread(target=runner)
-    thread.start()
-    thread.join(timeout=5.0)  # 5 second timeout
+messaging_service = SyncRabbitMQService(rabbitmq_url)
 
 # Mock inventory database
 inventory_db = {
@@ -151,14 +134,12 @@ class InventoryServicer(inventory_pb2_grpc.InventoryServiceServicer):
                 # Only publish alert if stock just fell below threshold
                 if old_quantity > LOW_STOCK_THRESHOLD or old_quantity > new_quantity:
                     try:
-                        # Publish low stock alert to RabbitMQ asynchronously
-                        run_async_in_thread(
-                            messaging_service.publish_low_stock_alert(
-                                inventory_item_id=item["id"],
-                                product_id=item["product_id"],
-                                current_quantity=new_quantity,
-                                threshold=LOW_STOCK_THRESHOLD
-                            )
+                        # Publish low stock alert to RabbitMQ synchronously
+                        messaging_service.publish_low_stock_alert(
+                            inventory_item_id=item["id"],
+                            product_id=item["product_id"],
+                            current_quantity=new_quantity,
+                            threshold=LOW_STOCK_THRESHOLD
                         )
                         
                         logger.warning(
@@ -171,14 +152,12 @@ class InventoryServicer(inventory_pb2_grpc.InventoryServiceServicer):
             # Publish inventory update event
             if old_quantity != new_quantity:
                 try:
-                    run_async_in_thread(
-                        messaging_service.publish_inventory_update(
-                            inventory_item_id=item["id"],
-                            product_id=item["product_id"],
-                            old_quantity=old_quantity,
-                            new_quantity=new_quantity,
-                            transaction_type="UPDATE"
-                        )
+                    messaging_service.publish_inventory_update(
+                        inventory_item_id=item["id"],
+                        product_id=item["product_id"],
+                        old_quantity=old_quantity,
+                        new_quantity=new_quantity,
+                        transaction_type="UPDATE"
                     )
                 except Exception as e:
                     logger.error(f"Failed to publish inventory update: {e}")
@@ -283,12 +262,14 @@ class InventoryServicer(inventory_pb2_grpc.InventoryServiceServicer):
 
 def serve():
     """Start gRPC server on port 50051"""
-    import asyncio
     try:
-        # Connect to RabbitMQ
+        # Connect to RabbitMQ synchronously
         logger.info(f"Connecting to RabbitMQ at {rabbitmq_url}")
-        asyncio.run(messaging_service.connect())
-        logger.info(f"RabbitMQ connection established. Alerts enabled: {ENABLE_AUTO_ALERTS}, Threshold: {LOW_STOCK_THRESHOLD}")
+        if messaging_service.connect():
+            logger.info(f"RabbitMQ connection established (sync). Alerts enabled: {ENABLE_AUTO_ALERTS}, Threshold: {LOW_STOCK_THRESHOLD}")
+        else:
+            logger.error("Failed to connect to RabbitMQ on startup")
+            # Continue anyway for graceful degradation
         
         # Start gRPC server
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
@@ -304,7 +285,7 @@ def serve():
     finally:
         # Cleanup RabbitMQ connection
         try:
-            asyncio.run(messaging_service.disconnect())
+            messaging_service.disconnect()
         except Exception as e:
             logger.error(f"Error disconnecting from RabbitMQ: {e}")
 
